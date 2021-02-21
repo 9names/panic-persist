@@ -73,21 +73,21 @@
 //! ```
 //!
 //! ## Features
-//! 
+//!
 //! There are two optional features, `utf8` and `custom-panic-handler`.
-//! 
+//!
 //! ### utf8
-//! 
+//!
 //! This allows the panic message to be returned
 //! as a `&str` rather than `&[u8]`, for easier printing. As this requires the ability
 //! to validate the UTF-8 string (to ensure it wasn't truncated mid-character), it may
 //! increase code size usage, and is by default off.
-//! 
+//!
 //! ### custom-panic-handler
-//! 
+//!
 //! This disables the panic handler from this library so that any user can implement their own.
 //! To persist panic messages, the function `report_panic_info` is made available;
-//! 
+//!
 //! ```rust
 //! // My custom panic implementation
 //! #[panic_handler]
@@ -103,10 +103,12 @@
 #![deny(warnings)]
 #![no_std]
 
+use bl602_hal as hal;
 use core::cmp::min;
 use core::fmt::Write;
 use core::mem::size_of;
 use core::panic::PanicInfo;
+use hal::{pac, prelude::_embedded_hal_blocking_delay_DelayMs};
 
 struct Ram {
     offset: usize,
@@ -150,7 +152,7 @@ impl core::fmt::Write for Ram {
             // Write the string to RAM
             core::ptr::copy(
                 data.as_ptr() as *mut u8,
-                start_ptr.offset(8).offset(self.offset as isize),
+                start_ptr.offset(8).add(self.offset),
                 str_len,
             );
 
@@ -248,9 +250,32 @@ pub fn report_panic_info(info: &PanicInfo) {
 #[cfg(not(feature = "custom-panic-handler"))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    cortex_m::interrupt::disable();
+    unsafe {
+        riscv::interrupt::disable();
+    }
 
     writeln!(Ram { offset: 0 }, "{}", info).ok();
-
-    cortex_m::peripheral::SCB::sys_reset();
+    // Assume the user would prefer a reset on panic
+    // Add a 1/2 second delay to ensure that we don't loop too fast
+    let mut d = bl602_hal::delay::McycleDelay::new(160_000_000);
+    d.try_delay_ms(500).unwrap();
+    // Clear the system reset bits, they're edge triggered and won't work otherwise
+    let glb = unsafe { &*pac::GLB::ptr() };
+    glb.swrst_cfg2.modify(|_r, w| {
+        w.reg_ctrl_cpu_reset()
+            .clear_bit()
+            .reg_ctrl_sys_reset()
+            .clear_bit()
+            .reg_ctrl_pwron_rst()
+            .clear_bit()
+    });
+    // Assert cpu + sys reset bits. Don't assert power-on reset, that would be a lie
+    glb.swrst_cfg2.modify(|_r, w| {
+        w.reg_ctrl_cpu_reset()
+            .set_bit()
+            .reg_ctrl_sys_reset()
+            .set_bit()
+    });
+    // We need to do nothing until the system has reset
+    loop {}
 }
